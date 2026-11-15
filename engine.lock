@@ -1,0 +1,8 @@
+# The engine source this plugin builds: the fork, its integration branch and
+# the exact commit. scripts/build-runtime.sh checks out this commit and records
+# it in build/runtime/RUNTIME.json; move the commit forward on purpose, in a
+# commit of its own ("engine.lock: <what the new engine commit brings>").
+ENGINE_REPOSITORY=git@github.com:pieceofmindcloud/Avalon.git
+ENGINE_UPSTREAM=https://github.com/freriadoc/Avalon
+ENGINE_BRANCH=pom
+ENGINE_COMMIT=378c3d8e65e5bb92b142d272c292ba9c41f6c8e3

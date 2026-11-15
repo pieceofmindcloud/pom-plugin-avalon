@@ -1,0 +1,78 @@
+{
+  "schema": "pom-plugin-ui/v1",
+  "plugin_code": "avalon",
+  "lifecycle": "resident",
+  "icon_image": "ui/icon.png",
+  "description": {
+    "en": "Runs models on the Avalon inference engine.",
+    "pt-BR": "Executa modelos no motor de inferência Avalon."
+  },
+  "screenshots": [
+    "docs/screenshots/main.png"
+  ],
+  "documentation": {
+    "guides": [
+      {
+        "id": "getting-started",
+        "title": {
+          "en": "Getting started",
+          "pt-BR": "Primeiros passos"
+        },
+        "asset": "docs/getting-started.md"
+      }
+    ],
+    "reference": []
+  },
+  "menu": [
+    {
+      "id": "avalon",
+      "label": {
+        "en": "Avalon",
+        "pt-BR": "Avalon"
+      },
+      "icon": "cpu",
+      "to": "/main"
+    }
+  ],
+  "routes": [
+    {
+      "path": "/main",
+      "screen": "main",
+      "full_bleed": false
+    }
+  ],
+  "screens": {
+    "main": {
+      "module": "ui/screens.js",
+      "export": "main",
+      "styles": [
+        "ui/plugin.css"
+      ]
+    }
+  },
+  "i18n": {
+    "en": "i18n/en.json",
+    "pt-BR": "i18n/pt-BR.json"
+  },
+  "development": {
+    "rebuild": [
+      {
+        "run": [
+          "scripts/dev-ui.sh"
+        ],
+        "os": [
+          "linux",
+          "macos"
+        ]
+      }
+    ]
+  },
+  "assets": [
+    "ui/screens.js",
+    "ui/plugin.css",
+    "ui/icon.png",
+    "i18n/en.json",
+    "i18n/pt-BR.json",
+    "docs/getting-started.md"
+  ]
+}
