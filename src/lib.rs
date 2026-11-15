@@ -19,6 +19,7 @@ mod context;
 pub mod engine;
 mod http;
 pub mod launch;
+mod sessions;
 mod settings;
 
 use context::Context;

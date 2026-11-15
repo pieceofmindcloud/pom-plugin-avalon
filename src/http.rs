@@ -8,15 +8,14 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-/// The largest request body the bridge reads (the POM sends at most 32 MiB).
-pub const MAX_BODY: usize = 32 << 20;
+/// The largest request body the bridge reads: a session piece is 64 MiB.
+pub const MAX_BODY: usize = 80 << 20;
 
 pub struct Request {
     pub method: String,
     /// The path without the query.
     pub path: String,
-    /// Decoded query parameters; the session routes read them (feature L4).
-    #[allow(dead_code)]
+    /// Decoded query parameters; the session routes read them.
     pub query: BTreeMap<String, String>,
     /// Lowercase names.
     pub headers: BTreeMap<String, String>,
@@ -126,6 +125,17 @@ fn reason(status: u16) -> &'static str {
         503 => "Service Unavailable",
         _ => "Error",
     }
+}
+
+/// A piece of a file, with the whole file's size in `x-file-size`.
+pub fn respond_bytes(mut stream: &TcpStream, bytes: &[u8], file_size: u64) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nx-file-size: {file_size}\r\nconnection: close\r\n\r\n",
+        bytes.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(bytes)?;
+    stream.flush()
 }
 
 /// A whole JSON answer.

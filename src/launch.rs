@@ -26,7 +26,13 @@ pub const STAGES: bool = false;
 /// derivative with the external tensor data loader).
 pub const STAGE_RANGES: &[&str] = &[];
 /// POM settings that apply to this engine's deployments (`pom_settings`).
-pub const POM_SETTINGS: &[&str] = &["cache_types", "batch", "sampling"];
+pub const POM_SETTINGS: &[&str] = &[
+    "cache_types",
+    "batch",
+    "sampling",
+    "inference_role",
+    "prefill_min_tokens",
+];
 /// How long a model may take to load before the load is an error.
 pub const LOAD_TIMEOUT_SECS: u64 = 1800;
 /// The environment variable an operator sets to a runtime built by hand.
@@ -82,6 +88,25 @@ pub fn mtp_draft(model: &Path) -> Option<PathBuf> {
         .collect();
     found.sort();
     found.into_iter().next()
+}
+
+/// What a saved session is bound to: the model file and the KV types (a slot file of another
+/// model or KV layout does not restore).
+pub fn session_fingerprint(request: &LoadRequest) -> String {
+    let model = request
+        .model_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let k = request
+        .cache_type_k
+        .clone()
+        .unwrap_or_else(|| kv_name(&request.kv));
+    let v = request
+        .cache_type_v
+        .clone()
+        .unwrap_or_else(|| kv_name(&request.kv));
+    format!("{model}|{k}|{v}|ctx{}", request.context)
 }
 
 /// The deployment's sampling defaults and the llama-server flag of each.
@@ -197,6 +222,10 @@ pub fn command(runtime: &Path, request: &LoadRequest, port: u16) -> Result<Launc
             "--cache-type-v-draft".into(),
             "q8_0".into(),
         ]);
+    }
+    // Conversation sessions: llama-server saves and restores a slot in the node's session folder.
+    if let Some(dir) = &request.session_dir {
+        args.extend(["--slot-save-path".into(), dir.display().to_string()]);
     }
     if let Some(mmproj) = request.mmproj_path.as_ref().filter(|_| VISION) {
         args.extend(["--mmproj".into(), mmproj.display().to_string()]);

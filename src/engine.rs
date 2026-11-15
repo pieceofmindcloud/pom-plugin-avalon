@@ -179,8 +179,8 @@ impl LoadRequest {
         if self.range.is_some() && launch::STAGE_RANGES.is_empty() {
             return Err("this engine does not cut a range from the whole model".into());
         }
-        if self.role.is_some() {
-            return Err("this engine has no prefill/decode split".into());
+        if self.role.is_some() && self.session_dir.is_none() {
+            return Err("a prefill/decode split needs the node's session folder".into());
         }
         Ok(())
     }
@@ -332,6 +332,7 @@ impl Engine {
             child: None,
             deadline: None,
             health: None,
+            sessions: None,
         };
         let manager = thread::Builder::new()
             .name(format!("pom-plugin-{}-engine", crate::PLUGIN_CODE))
@@ -555,6 +556,8 @@ struct Manager {
     deadline: Option<Instant>,
     /// The engine's port and health path while it loads.
     health: Option<(u16, String)>,
+    /// The sessions configuration this engine made (`crate::sessions::configure`).
+    sessions: Option<u64>,
 }
 
 impl Manager {
@@ -609,6 +612,9 @@ impl Manager {
     }
 
     fn unload(&mut self, phase: Phase, detail: Option<String>) {
+        if let Some(generation) = self.sessions.take() {
+            crate::sessions::clear(generation);
+        }
         if let Some(child) = self.child.take() {
             self.set_phase(Phase::Stopping, None);
             child.stop(STOP_GRACE);
@@ -650,6 +656,15 @@ impl Manager {
             "loading {} on port {port}",
             request.model_path.display()
         ));
+        // Sessions live in the node's folder; the engine is bound to its model file and KV types.
+        crate::sessions::configure(request.session_dir.as_ref().map(|dir| {
+            crate::sessions::Config {
+                dir: dir.clone(),
+                slots: request.sessions,
+                fingerprint: launch::session_fingerprint(&request),
+            }
+        }));
+        crate::sessions::set_role(request.role.clone(), request.prefill_min_tokens);
         self.update(|snapshot| snapshot.request = Some(request.clone()));
         self.set_phase(
             Phase::Loading,

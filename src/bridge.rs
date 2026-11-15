@@ -18,8 +18,9 @@
 //! `/v1/completions`. Reasoning must stay structured (`reasoning_content`),
 //! never `<think>` text in `t`. Tool calls stay in the answer text in the
 //! model's own form: the POM parses them. A capability the engine lacks is a
-//! clear `{"error"}` line, never a silent fallback. The session routes answer
-//! 501 until the engine has sessions: the POM then syncs nothing.
+//! clear `{"error"}` line, never a silent fallback. Conversation sessions and
+//! the prefill/decode split are `crate::sessions`: the routes answer 501 when
+//! the engine was loaded without the node's session folder.
 
 use crate::http::{self, NdjsonWriter, Request};
 use serde_json::{json, Map, Value};
@@ -139,13 +140,8 @@ fn serve(stream: &TcpStream, target: &Target, secret: &str, count: &Arc<AtomicU3
                 &json!({"loaded": ready, "in_flight": count.load(Ordering::SeqCst)}),
             );
         }
-        (_, path) if path.starts_with("/pom/session") => {
-            // Conversation sessions are an engine feature (feature-levels.md, L4).
-            let _ = http::respond_json(
-                stream,
-                501,
-                &json!({"error": "this engine keeps no conversation sessions"}),
-            );
+        (method, path) if path.starts_with("/pom/session") => {
+            session_route(stream, target, method, path, &request);
         }
         _ => {
             let _ = http::respond_json(stream, 404, &json!({"error": "not found"}));
@@ -158,9 +154,6 @@ pub fn engine_request(body: &Value, model: &str) -> Result<(&'static str, Value)
     let prompt = body["prompt"].as_str().ok_or("'prompt' must be a string")?;
     let chat = body["chat_template"].as_bool().unwrap_or(true);
     let probing = !probe_labels(body).is_empty();
-    if body["prefill_only"] == true {
-        return Err("this engine has no prefill/decode split".into());
-    }
     let images = body["images"].as_array().cloned().unwrap_or_default();
     if !images.is_empty() && !crate::launch::VISION {
         return Err("this engine does not read images".into());
@@ -274,6 +267,227 @@ pub fn label_probabilities(labels: &[String], candidates: &[(String, f64)]) -> V
         .collect()
 }
 
+/// A turn of a named conversation: its slot and its prompt's tokens.
+#[derive(Debug)]
+pub struct Turn {
+    pub key: String,
+    pub slot: u32,
+    pub ids: Vec<i64>,
+    /// A prefill turn not worth running (the decode machine holds most of the prompt).
+    pub skipped: Option<String>,
+}
+
+/// One JSON call to the engine's own API.
+fn engine_json(port: u16, method: &str, path: &str, body: &Value) -> Result<Value, String> {
+    let payload = body.to_string();
+    let response = http::request(
+        method,
+        port,
+        path,
+        &[("content-type", "application/json")],
+        Some(payload.as_bytes()),
+        ENGINE_SILENCE,
+    )
+    .map_err(|error| format!("{path}: {error}"))?;
+    let status = response.status;
+    let mut text = String::new();
+    let mut reader = response.body;
+    std::io::Read::read_to_string(&mut reader, &mut text).map_err(|error| error.to_string())?;
+    if status != 200 {
+        return Err(format!("{path} answered {status}: {}", text.trim()));
+    }
+    serde_json::from_str(&text).map_err(|error| format!("{path}: {error}"))
+}
+
+/// The tokens the engine reads for this request: the templated conversation, or the raw prompt.
+fn prompt_ids(port: u16, engine_body: &Value) -> Result<Vec<i64>, String> {
+    let text = if let Some(prompt) = engine_body["prompt"].as_str() {
+        prompt.to_owned()
+    } else {
+        let mut template = json!({"messages": engine_body["messages"]});
+        if let Some(kwargs) = engine_body.get("chat_template_kwargs") {
+            template["chat_template_kwargs"] = kwargs.clone();
+        }
+        engine_json(port, "POST", "/apply-template", &template)?["prompt"]
+            .as_str()
+            .ok_or("/apply-template gave no prompt")?
+            .to_owned()
+    };
+    let tokens = engine_json(
+        port,
+        "POST",
+        "/tokenize",
+        &json!({"content": text, "add_special": true, "parse_special": true}),
+    )?;
+    Ok(tokens["tokens"]
+        .as_array()
+        .ok_or("/tokenize gave no tokens")?
+        .iter()
+        .filter_map(Value::as_i64)
+        .collect())
+}
+
+/// Before a turn of a named conversation: its slot, the saved session restored there when the slot does
+/// not hold it and the session starts the prompt; a prefill turn's worth decided. None: no session.
+fn prepare_turn(port: u16, body: &Value, engine_body: &mut Value) -> Result<Option<Turn>, String> {
+    let Some(key) = body["session"]
+        .as_str()
+        .filter(|key| crate::sessions::valid_key(key))
+    else {
+        if body["prefill_only"] == true {
+            return Err("a prefill turn needs a conversation (session)".into());
+        }
+        return Ok(None);
+    };
+    if !crate::sessions::enabled() {
+        if body["prefill_only"] == true {
+            return Err("a prefill turn needs the node's session folder".into());
+        }
+        return Ok(None);
+    }
+    let ids = prompt_ids(port, engine_body)?;
+    if body["prefill_only"] == true {
+        let holds = body["decode_holds"].as_u64().unwrap_or(0) as usize;
+        let new = ids.len().saturating_sub(holds);
+        let min = crate::sessions::prefill_min_tokens() as usize;
+        if new < min.max(1) {
+            return Ok(Some(Turn {
+                key: key.to_owned(),
+                slot: 0,
+                ids,
+                skipped: Some(format!("{new} new tokens, under {min}")),
+            }));
+        }
+    }
+    let (slot, holds) = crate::sessions::slot_for(key).ok_or("sessions are off")?;
+    if !holds {
+        if let Some(saved) = crate::sessions::saved_ids(key) {
+            if crate::sessions::worth_restoring(&saved, &ids) {
+                let restored = engine_json(
+                    port,
+                    "POST",
+                    &format!("/slots/{slot}?action=restore"),
+                    &json!({"filename": crate::sessions::file_name(key, "full")}),
+                );
+                if restored.is_err() {
+                    // the slot's content is unknown now; the engine reads the prompt as it is
+                    crate::sessions::release_slot(slot);
+                }
+            }
+        }
+    }
+    engine_body["id_slot"] = json!(slot);
+    engine_body["cache_prompt"] = json!(true);
+    Ok(Some(Turn {
+        key: key.to_owned(),
+        slot,
+        ids,
+        skipped: None,
+    }))
+}
+
+/// After a turn: the slot saved to the session folder with the prompt's tokens.
+fn save_turn(port: u16, turn: &Turn) -> Result<Value, String> {
+    engine_json(
+        port,
+        "POST",
+        &format!("/slots/{}?action=save", turn.slot),
+        &json!({"filename": crate::sessions::file_name(&turn.key, "full")}),
+    )?;
+    crate::sessions::write_ids(&turn.key, &turn.ids)?;
+    Ok(json!({"ids": turn.ids.len(), "delta": false}))
+}
+
+/// `/pom/session*`: the files the POM moves between machines, and the snapshot actions.
+fn session_route(stream: &TcpStream, target: &Target, method: &str, path: &str, request: &Request) {
+    let reply = |status: u16, body: Value| {
+        let _ = http::respond_json(stream, status, &body);
+    };
+    if !crate::sessions::enabled() {
+        return reply(
+            501,
+            json!({"error": "this engine was loaded without a session folder"}),
+        );
+    }
+    let key = request.query.get("key").cloned().unwrap_or_default();
+    let kind = request.query.get("kind").cloned().unwrap_or_default();
+    let number = |name: &str| {
+        request
+            .query
+            .get(name)
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    match (method, path) {
+        ("GET", "/pom/session/offer") => match crate::sessions::offer(&key) {
+            Some(offer) if crate::sessions::valid_key(&key) => reply(200, offer),
+            _ => reply(400, json!({"error": "invalid session key"})),
+        },
+        ("GET", "/pom/session/pending") => reply(200, json!({"pending": false})),
+        ("GET", "/pom/session/file") => {
+            match crate::sessions::read_piece(
+                &key,
+                &kind,
+                number("offset").unwrap_or(0),
+                number("len").unwrap_or(0),
+            ) {
+                Ok(Some((bytes, size))) => {
+                    let _ = http::respond_bytes(stream, &bytes, size);
+                }
+                Ok(None) => reply(404, json!({"error": "no such session file"})),
+                Err(error) => reply(400, json!({"error": error})),
+            }
+        }
+        ("PUT", "/pom/session/chunk") => {
+            let (Some(offset), Some(total)) = (number("offset"), number("total")) else {
+                return reply(400, json!({"error": "offset and total are required"}));
+            };
+            match crate::sessions::write_piece(&key, &kind, offset, total, &request.body) {
+                Ok(whole) => reply(200, json!({"whole": whole})),
+                Err(error) => reply(400, json!({"error": error})),
+            }
+        }
+        ("POST", "/pom/session") => {
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+            let Some((port, _)) = target() else {
+                return reply(503, json!({"error": "the engine is not ready"}));
+            };
+            match body["action"].as_str() {
+                Some(action @ ("save" | "restore")) => {
+                    let filename = body["filename"].as_str().unwrap_or_default();
+                    if !crate::sessions::valid_key(filename) {
+                        return reply(400, json!({"error": "a bare file name is required"}));
+                    }
+                    let started = Instant::now();
+                    let slot = body["slot"].as_u64().unwrap_or(0);
+                    match engine_json(
+                        port,
+                        "POST",
+                        &format!("/slots/{slot}?action={action}"),
+                        &json!({"filename": filename}),
+                    ) {
+                        Ok(answer) => reply(
+                            200,
+                            json!({
+                                "tokens": answer["n_saved"].as_u64().or(answer["n_restored"].as_u64()).unwrap_or(0),
+                                "bytes": answer["n_written"].as_u64().or(answer["n_read"].as_u64()).unwrap_or(0),
+                                "ms": started.elapsed().as_millis() as u64,
+                            }),
+                        ),
+                        Err(error) => reply(400, json!({"error": error})),
+                    }
+                }
+                // deltas are never offered by this engine; the POM sends whole sessions
+                Some(other) => reply(
+                    400,
+                    json!({"error": format!("this engine has no session action '{other}'")}),
+                ),
+                None => reply(400, json!({"error": "an action is required"})),
+            }
+        }
+        _ => reply(404, json!({"error": "not found"})),
+    }
+}
+
 /// What one streamed engine event adds to the answer.
 #[derive(Debug, Default, PartialEq)]
 pub struct Delta {
@@ -376,11 +590,32 @@ fn generate(stream: &TcpStream, target: &Target, request: &Request) {
         Err(error) => return fail(format!("the body is not JSON: {error}")),
     };
     let labels = probe_labels(&body);
+    let prefill_only = body["prefill_only"] == true;
     let (path, engine_body) = match engine_request(&body, &model) {
         Ok(request) => request,
         Err(error) => return fail(error),
     };
     let started = Instant::now();
+    let mut engine_body = engine_body;
+    let turn = match prepare_turn(port, &body, &mut engine_body) {
+        Ok(turn) => turn,
+        Err(error) => return fail(error),
+    };
+    if let Some(Turn {
+        skipped: Some(reason),
+        ..
+    }) = &turn
+    {
+        // the decode machine already holds most of the prompt: a prefill here is not worth it
+        if let Ok(mut out) = NdjsonWriter::start(stream) {
+            let _ = out.line(
+                &json!({"done": {"finish": "stop", "prompt_tokens": 0, "completion_tokens": 0,
+                "prefill": {"skipped": reason}}}),
+            );
+            let _ = out.finish();
+        }
+        return;
+    }
     let payload = engine_body.to_string();
     let response = match http::request(
         "POST",
@@ -440,6 +675,13 @@ fn generate(stream: &TcpStream, target: &Target, request: &Request) {
         if delta.text.is_some() || delta.reasoning.is_some() {
             first.get_or_insert_with(|| started.elapsed());
         }
+        if prefill_only {
+            // a prefill turn reads the prompt and keeps it; its one token is not the answer
+            finish = delta.finish.or(finish);
+            usage = delta.usage.unwrap_or(usage);
+            timings = delta.timings.or(timings);
+            continue;
+        }
         let sent = delta
             .reasoning
             .map(|text| out.line(&json!({"r": text})))
@@ -471,6 +713,21 @@ fn generate(stream: &TcpStream, target: &Target, request: &Request) {
             return;
         };
         done["done"]["probe"] = json!({"probabilities": label_probabilities(&labels, &candidates)});
+    }
+    if let Some(turn) = &turn {
+        match save_turn(port, turn) {
+            Ok(saved) => {
+                done["done"]["session"] = json!({"key": turn.key, "saved": saved});
+                if prefill_only {
+                    done["done"]["prefill"] = json!({"tokens": turn.ids.len()});
+                }
+            }
+            Err(error) => {
+                let _ = out.line(&json!({"error": format!("the session was not saved: {error}")}));
+                let _ = out.finish();
+                return;
+            }
+        }
     }
     let _ = out.line(&done);
     let _ = out.finish();
@@ -531,8 +788,14 @@ mod tests {
         assert_eq!(probabilities[2], 0.0);
         let legacy = json!({"logprobs": {"top_logprobs": [{"A": -0.2}]}});
         assert_eq!(first_token_candidates(&legacy).unwrap()[0].0, "A");
-        let prefill = engine_request(&json!({"prompt": "x", "prefill_only": true}), "m");
-        assert!(prefill.unwrap_err().contains("prefill"));
+        // a prefill turn without a conversation is refused before the engine is asked
+        let mut engine_body = json!({});
+        let refused = prepare_turn(
+            1,
+            &json!({"prompt": "x", "prefill_only": true}),
+            &mut engine_body,
+        );
+        assert!(refused.unwrap_err().contains("session"));
         assert!(engine_request(&json!({}), "m").is_err());
     }
 
