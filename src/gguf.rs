@@ -23,6 +23,8 @@ pub struct Header {
     pub pom_end_layer: Option<u64>,
     /// Set on a POM slice: the original model's layer count.
     pub pom_original_block_count: Option<u64>,
+    /// Set on a header-only virtual slice: the first file of the whole model its tensors are read from.
+    pub external_first: Option<String>,
     pub tensors: Vec<String>,
 }
 
@@ -145,6 +147,21 @@ pub fn read_header(path: &Path) -> std::io::Result<Header> {
     for _ in 0..kv_count {
         let key = read_string(&mut reader)?;
         let kind = read_u32(&mut reader)?;
+        if key == "general.external_data.files" && kind == 9 {
+            // an array of strings: the whole model's files
+            let item = read_u32(&mut reader)?;
+            let count = read_u64(&mut reader)?;
+            if item != 8 || count > MAX_ENTRIES {
+                return Err(invalid("malformed external data files"));
+            }
+            for index in 0..count {
+                let name = read_string(&mut reader)?;
+                if index == 0 {
+                    header.external_first = Some(name);
+                }
+            }
+            continue;
+        }
         let value = read_value(&mut reader, kind)?;
         match (key.as_str(), value) {
             ("general.architecture", Value::Text(text)) => header.architecture = Some(text),
@@ -190,6 +207,17 @@ impl Stage {
     pub fn last(&self) -> bool {
         self.end + 1 >= self.total
     }
+}
+
+/// Where a virtual slice reads its tensors: the whole model's first file.
+pub fn external_source(path: &Path) -> Option<std::path::PathBuf> {
+    let first = read_header(path).ok()?.external_first?;
+    let first = std::path::PathBuf::from(first);
+    Some(if first.is_absolute() {
+        first
+    } else {
+        path.parent()?.join(first)
+    })
 }
 
 /// The stage a model file is, when it is a POM slice.

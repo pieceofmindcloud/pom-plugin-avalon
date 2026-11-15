@@ -115,6 +115,9 @@ pub fn runtime_version(runtime: &Path) -> Option<String> {
 /// The MTP draft head beside the model: `MTP/*.gguf` in the model's folder,
 /// as Avalon's model repository ships it.
 pub fn mtp_draft(model: &Path) -> Option<PathBuf> {
+    // a virtual slice lives apart from the model: its draft is beside the files it reads
+    let source = crate::gguf::external_source(model);
+    let model = source.as_deref().unwrap_or(model);
     let dir = model.parent()?.join("MTP");
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
