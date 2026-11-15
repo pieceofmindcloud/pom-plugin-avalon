@@ -20,6 +20,7 @@ pub mod engine;
 mod gguf;
 mod http;
 pub mod launch;
+mod runtime;
 mod sessions;
 mod settings;
 

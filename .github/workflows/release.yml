@@ -1,0 +1,195 @@
+name: Release
+
+# The Linux x86_64 release of the plugin with its two runtimes:
+#   cuda  NVIDIA cards (Turing to Blackwell), built in NVIDIA's CUDA image
+#   hip   AMD cards (RDNA3 and RDNA4), built in ROCm's image (docker/runtime-hip.Dockerfile)
+# Both are built from the Avalon commit engine.lock pins, portable (no -march=native), and attached to the release
+# beside the plugin; the plugin library pins their URL, SHA-256 and size (scripts/package.sh, src/runtime.rs) and
+# downloads the one a machine's cards need on its first load.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag, for example v0.1.0
+        type: string
+        required: true
+      prerelease:
+        description: Mark the GitHub release as a prerelease (and skip the license server)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CUDA_IMAGE: nvidia/cuda:12.9.1-devel-ubuntu24.04
+  CUDA_ARCHITECTURES: '75;80;86;89;90;120'
+  AMDGPU_TARGETS: 'gfx1100;gfx1101;gfx1102;gfx1200;gfx1201'
+  ROCM_VERSION: '7.2.4'
+
+jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Version is vX.Y.Z
+        shell: bash
+        run: '[[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || { echo "bad version $VERSION" >&2; exit 2; }'
+        env:
+          VERSION: ${{ inputs.version }}
+
+  runtime:
+    name: Runtime ${{ matrix.backend }}
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cuda, hip]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # the CUDA and ROCm images and the build need more disk than a runner has free
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+      - name: Engine source (engine.lock)
+        id: engine
+        shell: bash
+        run: |
+          source engine.lock
+          git init -q engine
+          git -C engine remote add origin "https://github.com/pieceofmindcloud/Avalon.git"
+          git -C engine fetch -q --depth 1 origin "$ENGINE_COMMIT"
+          git -C engine checkout -q --detach FETCH_HEAD
+          echo "commit=$ENGINE_COMMIT" >> "$GITHUB_OUTPUT"
+      - name: Build (cuda)
+        if: matrix.backend == 'cuda'
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/plugin" -v "$PWD/engine:/src:ro" \
+            -e AVALON_BACKEND=cuda -e AVALON_PORTABLE=1 -e AVALON_COMMIT="$COMMIT" \
+            -e CUDA_ARCHITECTURES="$CUDA_ARCHITECTURES" -e BUILD_JOBS="$(nproc)" \
+            "$CUDA_IMAGE" bash -c '
+              set -e
+              apt-get update -q && apt-get install -yq --no-install-recommends cmake git build-essential >/dev/null
+              /plugin/scripts/build-runtime.sh --source /src
+              chown -R '"$(id -u):$(id -g)"' /plugin/build'
+          tar -czf avalon-runtime-cuda.tar.gz -C build runtime
+        env:
+          COMMIT: ${{ steps.engine.outputs.commit }}
+      - name: Build (hip)
+        if: matrix.backend == 'hip'
+        shell: bash
+        run: |
+          AVALON_PORTABLE=1 AVALON_COMMIT="$COMMIT" BUILD_JOBS="$(nproc)" \
+            scripts/build-runtime.sh --source engine --hip
+          tar -czf avalon-runtime-hip.tar.gz -C build runtime-hip
+        env:
+          COMMIT: ${{ steps.engine.outputs.commit }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.backend }}
+          path: avalon-runtime-${{ matrix.backend }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  package:
+    name: Package
+    needs: runtime
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          merge-multiple: true
+          path: runtimes
+      - name: Build and package
+        shell: bash
+        run: |
+          ./scripts/package.sh --platform linux-x86_64 --version "${VERSION#v}" \
+            --runtime runtimes/avalon-runtime-cuda.tar.gz --runtime-hip runtimes/avalon-runtime-hip.tar.gz
+        env:
+          VERSION: ${{ inputs.version }}
+      - name: Test
+        run: cargo test --locked
+        env:
+          POM_UI_REQUIRE_DIST: '1'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            dist-release/pom-plugin-avalon-linux-x86_64.so
+            dist-release/pom-plugin-avalon-linux-x86_64.metadata.json
+            dist-release/pom-plugin-linux-x86_64.json
+            dist-release/avalon-runtime-cuda-linux-x86_64.tar.gz
+            dist-release/avalon-runtime-hip-linux-x86_64.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  release:
+    name: GitHub release
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: packages
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ${{ inputs.version }}
+          prerelease: ${{ inputs.prerelease }}
+          files: packages/*
+
+  license-server:
+    name: License server
+    needs: release
+    if: ${{ !inputs.prerelease }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download the package from the GitHub release
+        shell: bash
+        run: |
+          mkdir -p dist-release
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --dir dist-release --pattern 'pom-plugin-avalon-linux-x86_64.*'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+      - name: Publish the package to the license server
+        shell: bash
+        run: |
+          ./scripts/publish-to-license-server.sh --version "$VERSION" --platform linux-x86_64 \
+            --artifact dist-release/pom-plugin-avalon-linux-x86_64.so \
+            --metadata dist-release/pom-plugin-avalon-linux-x86_64.metadata.json --reason "release $VERSION"
+        env:
+          VERSION: ${{ inputs.version }}
+          POM_RELEASE_TOKEN: ${{ secrets.POM_RELEASE_TOKEN }}
+          POM_RELEASE_API: ${{ secrets.POM_RELEASE_API }}

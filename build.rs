@@ -37,6 +37,17 @@ fn ui_dist(root: &Path) -> PathBuf {
 fn main() {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let dist = ui_dist(&root);
+    // the runtime archives a release pins (src/runtime.rs, scripts/package.sh)
+    for variable in [
+        "AVALON_RUNTIME_URL",
+        "AVALON_RUNTIME_SHA256",
+        "AVALON_RUNTIME_SIZE",
+        "AVALON_RUNTIME_HIP_URL",
+        "AVALON_RUNTIME_HIP_SHA256",
+        "AVALON_RUNTIME_HIP_SIZE",
+    ] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
     println!("cargo:rerun-if-env-changed=POM_UI_REQUIRE_DIST");
     if env::var("POM_UI_REQUIRE_DIST").as_deref() == Ok("1") {
         assert!(

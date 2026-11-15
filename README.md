@@ -1,4 +1,8 @@
-# Avalon
+# Avalon · Qwen3.8-Flash-Next
+
+Runs **only Qwen3.8-Flash-Next** on [Avalon](https://github.com/freriadoc/Avalon), a llama.cpp fork tuned for it.
+Download the model first: [freriadoc/Qwen3.8-Flash-Next-Avalon-GGUF](https://huggingface.co/freriadoc/Qwen3.8-Flash-Next-Avalon-GGUF).
+Releases (`.github/workflows/release.yml`) carry the NVIDIA (CUDA) and AMD (ROCm) runtimes.
 
 A POM plugin (`plugin_code: avalon`): a native `cdylib` loaded by
 `pom-plugin-host`, with its own menu, screens and i18n embedded in the binary.
@@ -15,7 +19,7 @@ A POM plugin (`plugin_code: avalon`): a native `cdylib` loaded by
 | `ui/src/screens/` | one export per screen named in the manifest |
 | `i18n/` | catalogs with bare keys; the build prefixes `avalon.` |
 | `release/manifest.json` | release contract: ABI, `feature_set`, preferences schema |
-| `scripts/` | UI build, native build, packaging, CI plan, license server upload |
+| `scripts/` | UI build, native build, packaging (pins the runtimes), license server upload |
 | `tests/contract.rs` | static contract checks of both manifests |
 
 ## Build and verify

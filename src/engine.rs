@@ -672,6 +672,18 @@ impl Manager {
     fn load(&mut self, request: LoadRequest) {
         self.unload(Phase::Idle, None);
         let hip = launch::wants_hip(&request);
+        // a release's first load on this machine: download the runtime it pins for these cards
+        if self.find_runtime(Some(hip)).is_none() && crate::runtime::pinned(hip) {
+            self.update(|snapshot| snapshot.request = Some(request.clone()));
+            self.set_phase(
+                Phase::Loading,
+                Some("downloading the Avalon runtime".into()),
+            );
+            self.append_log("downloading the runtime this release pins");
+            if let Err(error) = crate::runtime::install(&self.base, hip) {
+                return self.fail(format!("could not install the Avalon runtime: {error}"));
+            }
+        }
         let Some(runtime) = self.find_runtime(Some(hip)) else {
             return self.fail(if hip {
                 format!(

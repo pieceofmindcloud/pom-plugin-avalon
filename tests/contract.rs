@@ -201,7 +201,7 @@ fn release_contract_and_packaging_agree() {
     let package = text("scripts/package.sh");
     assert!(package.contains("pom-plugin-${platform}.json"));
     assert!(package.contains("($contract[0]) + {"));
-    let workflow = text(".github/workflows/publish-release.yml");
+    let workflow = text(".github/workflows/release.yml");
     assert!(
         workflow.contains("POM_RELEASE_TOKEN")
             && workflow.contains("if: ${{ !inputs.prerelease }}")

@@ -4,8 +4,8 @@
   "lifecycle": "resident",
   "icon_image": "ui/icon.png",
   "description": {
-    "en": "Runs models on the Avalon inference engine.",
-    "pt-BR": "Executa modelos no motor de inferência Avalon."
+    "en": "Avalon for Qwen3.8-Flash-Next only: a fast llama.cpp fork that runs this one model (experts in RAM, a GPU expert cache, MTP) on NVIDIA and AMD cards. It runs no other model: download Qwen3.8-Flash-Next-Avalon-GGUF from Hugging Face (freriadoc) first.",
+    "pt-BR": "Avalon só para o Qwen3.8-Flash-Next: um fork rápido do llama.cpp que roda apenas este modelo (experts na RAM, cache de experts na GPU, MTP) em placas NVIDIA e AMD. Não roda nenhum outro modelo: baixe antes o Qwen3.8-Flash-Next-Avalon-GGUF do Hugging Face (freriadoc)."
   },
   "screenshots": [
     "docs/screenshots/main.png"
@@ -27,8 +27,8 @@
     {
       "id": "avalon",
       "label": {
-        "en": "Avalon",
-        "pt-BR": "Avalon"
+        "en": "Avalon · Qwen3.8-Flash-Next",
+        "pt-BR": "Avalon · Qwen3.8-Flash-Next"
       },
       "icon": "cpu",
       "to": "/main"

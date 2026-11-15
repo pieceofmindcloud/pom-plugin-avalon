@@ -1,6 +1,6 @@
 {
-  "main.title": "Avalon",
-  "main.subtitle": "The Avalon inference engine on this machine.",
+  "main.title": "Avalon · Qwen3.8-Flash-Next",
+  "main.subtitle": "Runs only Qwen3.8-Flash-Next, from the Avalon GGUF (freriadoc/Qwen3.8-Flash-Next-Avalon-GGUF on Hugging Face).",
   "main.loading": "Asking the engine...",
   "main.engine": "Engine",
   "main.model": "Model",

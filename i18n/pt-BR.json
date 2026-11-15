@@ -1,6 +1,6 @@
 {
-  "main.title": "Avalon",
-  "main.subtitle": "O motor de inferência Avalon nesta máquina.",
+  "main.title": "Avalon · Qwen3.8-Flash-Next",
+  "main.subtitle": "Roda apenas o Qwen3.8-Flash-Next, a partir do GGUF do Avalon (freriadoc/Qwen3.8-Flash-Next-Avalon-GGUF no Hugging Face).",
   "main.loading": "Consultando o motor...",
   "main.engine": "Motor",
   "main.model": "Modelo",
