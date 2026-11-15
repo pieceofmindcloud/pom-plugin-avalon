@@ -6,3 +6,4 @@
 /build/
 build-runtime.log
 cluster-update.log
+hf-download.log

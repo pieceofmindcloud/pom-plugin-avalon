@@ -547,6 +547,23 @@ fn stop_stale(pid_file: &Path, program: &Path) {
     }
 }
 
+/// What a known engine abort in the log means for the operator.
+fn known_failure(log: &str) -> Option<&'static str> {
+    // only the last start's lines count
+    let last = log.rsplit("[pom-plugin-").next().unwrap_or(log);
+    let start = log.rfind(" loading ").map(|at| &log[at..]).unwrap_or(last);
+    if start.contains("MUL_MAT_ID with host weights outside a hosted MoE block") {
+        return Some(
+            "Avalon does not run this model's expert quantization (a Strata pack, for one); \
+             deploy the Avalon GGUF (freriadoc/Qwen3.8-Flash-Next-Avalon-GGUF)",
+        );
+    }
+    if start.contains("cudaMalloc failed") || start.contains("out of memory") {
+        return Some("the GPU ran out of memory: lower the context or the sessions");
+    }
+    None
+}
+
 struct Manager {
     base: PathBuf,
     run: PathBuf,
@@ -688,7 +705,13 @@ impl Manager {
         };
         if let Some(status) = child.exited() {
             self.child = None;
-            return self.fail(format!("the engine stopped ({status})"));
+            let reason = fs::read_to_string(self.run.join("engine.log"))
+                .ok()
+                .and_then(|log| known_failure(&log));
+            return self.fail(match reason {
+                Some(reason) => format!("the engine stopped ({status}): {reason}"),
+                None => format!("the engine stopped ({status})"),
+            });
         }
         let Some((port, path)) = self.health.clone() else {
             return;
@@ -720,6 +743,17 @@ impl Manager {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_known_abort_is_named_for_the_operator() {
+        let log = "[pom-plugin-avalon] loading a.gguf on port 1\nggml-cuda.cu:7328: MUL_MAT_ID with host weights outside a hosted MoE block (ffn_moe_gate-8)\n";
+        assert!(super::known_failure(log).unwrap().contains("Avalon GGUF"));
+        let later = format!("{log}[pom-plugin-avalon] loading b.gguf on port 2\nok\n");
+        assert!(
+            super::known_failure(&later).is_none(),
+            "only the last start counts"
+        );
+    }
+
     use super::*;
 
     #[test]
