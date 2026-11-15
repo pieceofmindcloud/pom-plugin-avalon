@@ -38,6 +38,8 @@ pub const POM_SETTINGS: &[&str] = &[
 pub const LOAD_TIMEOUT_SECS: u64 = 1800;
 /// The environment variable an operator sets to a runtime built by hand.
 pub const RUNTIME_ENV: &str = "POM_AVALON_RUNTIME_DIR";
+/// The same for the AMD (HIP) runtime.
+pub const RUNTIME_HIP_ENV: &str = "POM_AVALON_RUNTIME_HIP_DIR";
 
 /// One start of the engine's server.
 #[derive(Debug, Clone, PartialEq)]
@@ -92,15 +94,28 @@ pub fn is_runtime(dir: &Path) -> bool {
     dir.join("bin/server").is_file()
 }
 
+/// Which build of the engine a load runs on: the AMD one when the node gives
+/// no NVIDIA card and has an AMD card (the node lists NVIDIA cards in `gpus`
+/// and every card in `gpu_devices`).
+pub fn wants_hip(request: &LoadRequest) -> bool {
+    request.gpus.is_empty() && !amd_ordinals(request).is_empty()
+}
+
 /// The runtime, first match wins: the operator's directory, then the
-/// `build/runtime` of the source this library was built from (the POM's
-/// development rebuild compiles the mounted source, so the node reads the
-/// runtime straight from the mount), then the plugin directory's copy.
-pub fn find_runtime(plugin_dir: &Path) -> Option<PathBuf> {
+/// `build/runtime` (`build/runtime-hip` for AMD cards) of the source this
+/// library was built from (the POM's development rebuild compiles the mounted
+/// source, so the node reads the runtime straight from the mount), then the
+/// plugin directory's copy (`runtime` or `runtime-hip`).
+pub fn find_runtime(plugin_dir: &Path, hip: bool) -> Option<PathBuf> {
+    let name = if hip { "runtime-hip" } else { "runtime" };
     let candidates = [
-        std::env::var_os(RUNTIME_ENV).map(PathBuf::from),
-        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("build/runtime")),
-        Some(plugin_dir.join("runtime")),
+        std::env::var_os(if hip { RUNTIME_HIP_ENV } else { RUNTIME_ENV }).map(PathBuf::from),
+        Some(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("build")
+                .join(name),
+        ),
+        Some(plugin_dir.join(name)),
     ];
     candidates.into_iter().flatten().find(|dir| is_runtime(dir))
 }
@@ -506,5 +521,11 @@ mod tests {
         assert!(launch
             .env
             .contains(&("HIP_VISIBLE_DEVICES".into(), "0".into())));
+        assert!(wants_hip(&request));
+        let nvidia = LoadRequest::from_json(&json!({"model_path": "/m.gguf", "gpus": [0],
+            "gpu_devices": [{"index": 0, "vendor": "nvidia", "ordinal": 0},
+                            {"index": 1, "vendor": "amd", "ordinal": 0}]}))
+        .unwrap();
+        assert!(!wants_hip(&nvidia));
     }
 }

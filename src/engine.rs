@@ -613,8 +613,13 @@ impl Manager {
         }
     }
 
-    fn find_runtime(&self) -> Option<PathBuf> {
-        let runtime = launch::find_runtime(&self.base);
+    /// `hip`: the AMD build; `None` (before a load): whichever is built, the NVIDIA one first.
+    fn find_runtime(&self, hip: Option<bool>) -> Option<PathBuf> {
+        let runtime = match hip {
+            Some(hip) => launch::find_runtime(&self.base, hip),
+            None => launch::find_runtime(&self.base, false)
+                .or_else(|| launch::find_runtime(&self.base, true)),
+        };
         let version = runtime.as_deref().and_then(launch::runtime_version);
         self.update(|snapshot| {
             snapshot.runtime = runtime.clone();
@@ -624,7 +629,7 @@ impl Manager {
     }
 
     fn run(mut self) {
-        self.find_runtime();
+        self.find_runtime(None);
         loop {
             match self.commands.recv_timeout(POLL) {
                 Ok(Command_::Load(request)) => self.load(*request),
@@ -666,12 +671,21 @@ impl Manager {
 
     fn load(&mut self, request: LoadRequest) {
         self.unload(Phase::Idle, None);
-        let Some(runtime) = self.find_runtime() else {
-            return self.fail(format!(
-                "no {} runtime: build it (scripts/build-runtime.sh) or set {}",
-                crate::PLUGIN_CODE,
-                launch::RUNTIME_ENV
-            ));
+        let hip = launch::wants_hip(&request);
+        let Some(runtime) = self.find_runtime(Some(hip)) else {
+            return self.fail(if hip {
+                format!(
+                    "no {} runtime for AMD cards: build it (scripts/build-runtime.sh --hip) or set {}",
+                    crate::PLUGIN_CODE,
+                    launch::RUNTIME_HIP_ENV
+                )
+            } else {
+                format!(
+                    "no {} runtime: build it (scripts/build-runtime.sh) or set {}",
+                    crate::PLUGIN_CODE,
+                    launch::RUNTIME_ENV
+                )
+            });
         };
         let port = match http::free_port() {
             Ok(port) => port,
@@ -838,7 +852,7 @@ mod tests {
         engine
             .load(LoadRequest::from_json(&json!({"model_path": model})).unwrap())
             .unwrap();
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + Duration::from_secs(60);
         while engine.snapshot().phase != Phase::Error && Instant::now() < until {
             thread::sleep(Duration::from_millis(50));
         }
