@@ -19,7 +19,7 @@ pub const ARCHITECTURES: &[&str] = &["qwen4exp"];
 /// The engine reads images through the deployment's projector (`mmproj_path`).
 pub const VISION: bool = false;
 /// The engine runs a POM layer slice as one stage of a split (feature L6).
-pub const STAGES: bool = false;
+pub const STAGES: bool = true;
 /// Architectures whose stages this engine cuts itself from the whole model
 /// (`range` in `engine.load`, announced as `stage_ranges`). Leave empty when
 /// the engine reads the node's header-only virtual slice instead (a llama.cpp
@@ -32,6 +32,7 @@ pub const POM_SETTINGS: &[&str] = &[
     "sampling",
     "inference_role",
     "prefill_min_tokens",
+    "hidden_state_dtype",
 ];
 /// How long a model may take to load before the load is an error.
 pub const LOAD_TIMEOUT_SECS: u64 = 1800;
@@ -49,6 +50,41 @@ pub struct Launch {
     pub health_path: String,
     /// The model name the engine's OpenAI API expects in requests.
     pub served_model: String,
+    /// An earlier stage of a split model: the loopback port and secret it serves the next stage on (`engine.link`).
+    pub link: Option<(u16, String)>,
+}
+
+/// What this machine runs of a model split by layers across machines (`link` in `engine.load`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageRole {
+    /// The whole model, or a split's last stage that is also its first (no link to make).
+    Whole,
+    /// The last stage: it serves the requests and takes its input rows from the stage before it.
+    Head { prev_port: u16, token: String },
+    /// An earlier stage: it serves its rows to the next stage, and takes its own from the one before when it is a
+    /// middle stage.
+    Serve { prev: Option<(u16, String)> },
+}
+
+/// The stage this load is: from `link` (the POM gives `{}` to the first stage, `{token, prev_port}` to a later one)
+/// and the slice's own `pom.*` keys (whether it holds the model's last layer).
+pub fn stage_role(request: &LoadRequest) -> Result<StageRole, String> {
+    let Some(link) = &request.link else {
+        return Ok(StageRole::Whole);
+    };
+    let prev = match (link["prev_port"].as_u64(), link["token"].as_str()) {
+        (Some(port), Some(token)) if port > 0 && port <= u64::from(u16::MAX) => {
+            Some((port as u16, token.to_owned()))
+        }
+        (None, None) => None,
+        _ => return Err("the stage link needs both prev_port and token".into()),
+    };
+    let last = crate::gguf::stage_of(&request.model_path).is_none_or(|stage| stage.last());
+    Ok(match (last, prev) {
+        (true, Some((prev_port, token))) => StageRole::Head { prev_port, token },
+        (true, None) => StageRole::Whole,
+        (false, prev) => StageRole::Serve { prev },
+    })
 }
 
 /// What a usable runtime directory holds.
@@ -155,6 +191,8 @@ fn setting_u64(request: &LoadRequest, key: &str) -> Option<u64> {
 }
 
 pub fn command(runtime: &Path, request: &LoadRequest, port: u16) -> Result<Launch, String> {
+    let role = stage_role(request)?;
+    let whole = role == StageRole::Whole;
     let mut args: Vec<String> = vec![
         "--host".into(),
         "127.0.0.1".into(),
@@ -206,7 +244,9 @@ pub fn command(runtime: &Path, request: &LoadRequest, port: u16) -> Result<Launc
         .get("mtp")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
-    if let Some(draft) = mtp_draft(&request.model_path).filter(|_| mtp) {
+    if let Some(draft) =
+        mtp_draft(&request.model_path).filter(|_| mtp && !matches!(role, StageRole::Serve { .. }))
+    {
         let draft_n = setting_u64(request, "draft_n").unwrap_or(2).clamp(1, 8);
         args.extend([
             "--model-draft".into(),
@@ -224,7 +264,8 @@ pub fn command(runtime: &Path, request: &LoadRequest, port: u16) -> Result<Launc
         ]);
     }
     // Conversation sessions: llama-server saves and restores a slot in the node's session folder.
-    if let Some(dir) = &request.session_dir {
+    // a stage's sessions hold only its own layers: they are kept on a whole model only
+    if let Some(dir) = request.session_dir.as_ref().filter(|_| whole) {
         args.extend(["--slot-save-path".into(), dir.display().to_string()]);
     }
     if let Some(mmproj) = request.mmproj_path.as_ref().filter(|_| VISION) {
@@ -269,12 +310,40 @@ pub fn command(runtime: &Path, request: &LoadRequest, port: u16) -> Result<Launc
             env.push(("HIP_VISIBLE_DEVICES".into(), amd.join(",")));
         }
     }
+    let mut program = runtime.join("bin/server");
+    let mut health_path = "/health".to_owned();
+    let mut link = None;
+    match role {
+        StageRole::Whole => {}
+        StageRole::Head { prev_port, token } => {
+            args.extend(["--stage-prev".into(), format!("127.0.0.1:{prev_port}")]);
+            // a restored checkpoint would hold this stage's layers only: the earlier stage would not follow it
+            args.extend(["--ctx-checkpoints".into(), "0".into()]);
+            env.push(("LLAMA_STAGE_PREV_TOKEN".into(), token));
+        }
+        StageRole::Serve { prev } => {
+            program = runtime.join("bin/stage-server");
+            let serve_port = crate::http::free_port()?;
+            let secret = crate::http::random_hex(24);
+            // the stage server answers no HTTP: it is ready once its port takes a connection
+            health_path = String::new();
+            args.retain(|arg| arg != "--no-webui" && arg != "--jinja");
+            args.extend(["--stage-serve".into(), format!("127.0.0.1:{serve_port}")]);
+            env.push(("LLAMA_STAGE_TOKEN".into(), secret.clone()));
+            if let Some((prev_port, token)) = prev {
+                args.extend(["--stage-prev".into(), format!("127.0.0.1:{prev_port}")]);
+                env.push(("LLAMA_STAGE_PREV_TOKEN".into(), token));
+            }
+            link = Some((serve_port, secret));
+        }
+    }
     Ok(Launch {
-        program: runtime.join("bin/server"),
+        program,
         args,
         env,
-        health_path: "/health".into(),
+        health_path,
         served_model: request.model_label.clone(),
+        link,
     })
 }
 
@@ -282,6 +351,7 @@ pub fn command(runtime: &Path, request: &LoadRequest, port: u16) -> Result<Launc
 mod tests {
     use super::*;
     use serde_json::json;
+    use serde_json::Value;
 
     #[test]
     fn the_server_listens_on_loopback_on_the_given_port() {
@@ -339,6 +409,88 @@ mod tests {
             .unwrap();
         let args = command(Path::new("/rt"), &off, 1).unwrap().args.join(" ");
         assert!(!args.contains("--model-draft"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A header-only GGUF with the POM slice keys.
+    fn slice(path: &Path, start: u32, end: u32, total: u32) {
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend(3u32.to_le_bytes());
+        bytes.extend(0u64.to_le_bytes());
+        bytes.extend(3u64.to_le_bytes());
+        for (key, value) in [
+            ("pom.start_layer", start),
+            ("pom.end_layer", end),
+            ("pom.original_block_count", total),
+        ] {
+            bytes.extend((key.len() as u64).to_le_bytes());
+            bytes.extend(key.as_bytes());
+            bytes.extend(4u32.to_le_bytes());
+            bytes.extend(value.to_le_bytes());
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn each_stage_of_a_split_runs_its_own_program() {
+        let dir = std::env::temp_dir().join(format!("avalon-stage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (first, last) = (dir.join("first.gguf"), dir.join("last.gguf"));
+        slice(&first, 0, 23, 48);
+        slice(&last, 24, 47, 48);
+        let at = |path: &Path, link: Value| {
+            LoadRequest::from_json(
+                &json!({"model_path": path.display().to_string(), "link": link,
+                "session_dir": dir.display().to_string()}),
+            )
+            .unwrap()
+        };
+
+        // the first stage serves its rows; the POM reaches it through engine.link
+        let launch = command(Path::new("/rt"), &at(&first, json!({})), 1).unwrap();
+        assert!(launch.program.ends_with("bin/stage-server"));
+        let (serve_port, secret) = launch.link.clone().unwrap();
+        assert!(launch
+            .args
+            .join(" ")
+            .contains(&format!("--stage-serve 127.0.0.1:{serve_port}")));
+        assert!(launch.env.contains(&("LLAMA_STAGE_TOKEN".into(), secret)));
+        assert!(launch.health_path.is_empty());
+        assert!(
+            !launch.args.join(" ").contains("--slot-save-path"),
+            "no sessions on a stage"
+        );
+
+        // the last stage serves the requests and reads its input from the relay
+        let launch = command(
+            Path::new("/rt"),
+            &at(&last, json!({"token": "t", "prev_port": 4100})),
+            1,
+        )
+        .unwrap();
+        assert!(launch.program.ends_with("bin/server"));
+        let args = launch.args.join(" ");
+        assert!(
+            args.contains("--stage-prev 127.0.0.1:4100") && args.contains("--ctx-checkpoints 0")
+        );
+        assert!(launch
+            .env
+            .contains(&("LLAMA_STAGE_PREV_TOKEN".into(), "t".into())));
+        assert!(launch.link.is_none());
+
+        // a middle stage does both
+        let middle = dir.join("middle.gguf");
+        slice(&middle, 16, 31, 48);
+        let launch = command(
+            Path::new("/rt"),
+            &at(&middle, json!({"token": "t", "prev_port": 4100})),
+            1,
+        )
+        .unwrap();
+        let args = launch.args.join(" ");
+        assert!(args.contains("--stage-serve") && args.contains("--stage-prev 127.0.0.1:4100"));
+
+        assert!(stage_role(&at(&last, json!({"token": "t"}))).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

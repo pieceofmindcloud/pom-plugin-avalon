@@ -1,6 +1,16 @@
 # Avalon across machines (feature level L6) - design
 
-Status: proposal, nothing implemented beyond the two fork branches below.
+Status: implemented, not yet run across two machines. The fork's
+`feature/stage-link` took a simpler shape than the proposal below: the link
+works per decode, through two public hooks (`llama_set_input_rows_cb`,
+`llama_set_memory_op_cb`) instead of replacing `stage_first`; each machine
+loads its POM slice (real or virtual) as a model. The earlier stage is
+`llama-stage-server --stage-serve`, the last `llama-server --stage-prev`
+(`common/stage-link.h` has the frames). Limits today: a prompt is not
+micro-pipelined across the machines (one round trip per decode), the earlier
+stage's state is not in a saved session (sessions are off on a stage), and the
+last stage runs with `--ctx-checkpoints 0`. The text below is the original
+proposal.
 
 ## What Avalon already has
 

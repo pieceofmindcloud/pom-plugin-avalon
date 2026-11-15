@@ -67,8 +67,10 @@ esac
 [[ "${AVALON_PORTABLE:-0}" == 1 ]] && cmake_args+=(-DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON)
 build_dir="$root/build/engine-$backend"
 cmake -S "$source_dir" -B "$build_dir" "${cmake_args[@]}"
-cmake --build "$build_dir" -j"$(nproc)" --target llama-server
+cmake --build "$build_dir" -j"$(nproc)" --target llama-server llama-stage-server
 cp "$build_dir/bin/llama-server" "$staging/bin/server"
+# an earlier stage of a model split across machines (src/launch.rs, StageRole::Serve)
+cp "$build_dir/bin/llama-stage-server" "$staging/bin/stage-server"
 # The expert ranking the cache is prefilled from, when the engine ships one.
 find "$source_dir" -maxdepth 2 -name 'moe-cache-ranking*.bin' -exec cp {} "$staging/" \; 2>/dev/null || true
 # Carry the GPU runtime libraries the node image lacks.

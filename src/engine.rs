@@ -216,6 +216,8 @@ pub struct Snapshot {
     pub request: Option<LoadRequest>,
     /// The engine server's loopback port and the model name it serves.
     pub engine: Option<(u16, String)>,
+    /// An earlier stage's link to the next stage: its loopback port and secret.
+    pub link: Option<(u16, String)>,
     pub since: Instant,
 }
 
@@ -228,6 +230,7 @@ impl Snapshot {
             runtime_version: None,
             request: None,
             engine: None,
+            link: None,
             since: Instant::now(),
         }
     }
@@ -378,7 +381,15 @@ impl Engine {
 
     /// `engine.link`: an earlier stage's port and secret (feature L6).
     pub fn link_json(&self) -> Value {
-        json!({"status": "error", "error": "this engine does not run stages"})
+        let snapshot = self.snapshot();
+        match (snapshot.phase, &snapshot.link) {
+            (Phase::Ready, Some((port, token))) => {
+                json!({"status": "ready", "port": port, "token": token})
+            }
+            (Phase::Loading, _) => json!({"status": "starting"}),
+            (Phase::Error, _) => json!({"status": "error", "error": snapshot.detail}),
+            _ => json!({"status": "error", "error": "this machine serves no later stage"}),
+        }
     }
 
     pub fn load(&self, request: LoadRequest) -> Result<(), String> {
@@ -640,6 +651,7 @@ impl Manager {
         self.deadline = None;
         self.update(|snapshot| {
             snapshot.engine = None;
+            snapshot.link = None;
             if phase == Phase::Idle {
                 snapshot.request = None;
             }
@@ -673,15 +685,19 @@ impl Manager {
             "loading {} on port {port}",
             request.model_path.display()
         ));
-        // Sessions live in the node's folder; the engine is bound to its model file and KV types.
-        crate::sessions::configure(request.session_dir.as_ref().map(|dir| {
-            crate::sessions::Config {
+        // Sessions live in the node's folder, on a whole model only; the engine is bound to its model file and KV types.
+        if let Some(dir) = request
+            .session_dir
+            .as_ref()
+            .filter(|_| request.link.is_none())
+        {
+            self.sessions = Some(crate::sessions::configure(Some(crate::sessions::Config {
                 dir: dir.clone(),
                 slots: request.sessions,
                 fingerprint: launch::session_fingerprint(&request),
-            }
-        }));
-        crate::sessions::set_role(request.role.clone(), request.prefill_min_tokens);
+            })));
+            crate::sessions::set_role(request.role.clone(), request.prefill_min_tokens);
+        }
         self.update(|snapshot| snapshot.request = Some(request.clone()));
         self.set_phase(
             Phase::Loading,
@@ -693,7 +709,11 @@ impl Manager {
                 self.health = Some((port, launch.health_path.clone()));
                 self.deadline =
                     Some(Instant::now() + Duration::from_secs(launch::LOAD_TIMEOUT_SECS));
-                self.update(|snapshot| snapshot.engine = Some((port, launch.served_model.clone())));
+                let link = launch.link.clone();
+                self.update(|snapshot| {
+                    snapshot.engine = Some((port, launch.served_model.clone()));
+                    snapshot.link = link;
+                });
             }
             Err(error) => self.fail(error),
         }
@@ -716,8 +736,25 @@ impl Manager {
         let Some((port, path)) = self.health.clone() else {
             return;
         };
-        let healthy = http::request("GET", port, &path, &[], None, Duration::from_secs(1))
-            .is_ok_and(|response| response.status == 200);
+        let healthy = if path.is_empty() {
+            // a stage server: ready once its port takes a connection (it listens after the load)
+            let serve_port = self
+                .shared
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .link
+                .as_ref()
+                .map(|(port, _)| *port)
+                .unwrap_or(port);
+            std::net::TcpStream::connect_timeout(
+                &([127, 0, 0, 1], serve_port).into(),
+                Duration::from_secs(1),
+            )
+            .is_ok()
+        } else {
+            http::request("GET", port, &path, &[], None, Duration::from_secs(1))
+                .is_ok_and(|response| response.status == 200)
+        };
         let phase = self
             .shared
             .lock()

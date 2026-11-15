@@ -5,4 +5,4 @@
 ENGINE_REPOSITORY=git@github.com:pieceofmindcloud/Avalon.git
 ENGINE_UPSTREAM=https://github.com/freriadoc/Avalon
 ENGINE_BRANCH=pom
-ENGINE_COMMIT=378c3d8e65e5bb92b142d272c292ba9c41f6c8e3
+ENGINE_COMMIT=14854c9bf1851ced3dc5fbc39863529e7790e9e6

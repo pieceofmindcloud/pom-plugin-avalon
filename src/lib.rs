@@ -17,6 +17,7 @@ mod abi;
 mod bridge;
 mod context;
 pub mod engine;
+mod gguf;
 mod http;
 pub mod launch;
 mod sessions;
