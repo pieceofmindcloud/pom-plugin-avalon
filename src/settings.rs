@@ -68,6 +68,16 @@ pub fn all() -> Vec<Setting> {
             pom: false,
         },
         Setting {
+            key: "expert_ram_gb",
+            kind: "integer",
+            en: ("RAM for experts (GB)", "Host RAM this machine gives the experts the GPU does not hold (0 = automatic: every expert copied to RAM when they all fit, else a smaller arena). Set it when several stages share one machine: each measures the free RAM alone."),
+            pt: ("RAM para experts (GB)", "RAM que esta máquina dá aos experts que a GPU não guarda (0 = automático: todos copiados para a RAM quando cabem, senão uma arena menor). Defina quando vários estágios dividem uma máquina: cada um mede a RAM livre sozinho."),
+            min: Some(0.0),
+            max: Some(4096.0),
+            options: &[],
+            pom: false,
+        },
+        Setting {
             key: "tail_skip",
             kind: "boolean",
             en: ("Skip rare missed experts", "Experts every token of a verification routes only at rank 7 or lower are skipped when missing from the GPU (Avalon's default, same GSM8K score)."),

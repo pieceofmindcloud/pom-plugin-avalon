@@ -310,6 +310,10 @@ pub fn command(runtime: &Path, request: &LoadRequest, port: u16) -> Result<Launc
     {
         env.push(("LLAMA_STAGES".into(), "0".into()));
     }
+    // the RAM the experts take: an arena of that size instead of every expert copied when they fit
+    if let Some(gb) = setting_u64(request, "expert_ram_gb").filter(|gb| *gb > 0) {
+        env.push(("GGML_CUDA_MOE_ARENA_MB".into(), (gb * 1024).to_string()));
+    }
     let tensile = runtime.join("lib/rocblas/library");
     if tensile.is_dir() {
         env.push((
@@ -522,6 +526,14 @@ mod tests {
             .env
             .contains(&("HIP_VISIBLE_DEVICES".into(), "0".into())));
         assert!(wants_hip(&request));
+        let capped = LoadRequest::from_json(
+            &json!({"model_path": "/m.gguf", "settings": {"expert_ram_gb": 30}}),
+        )
+        .unwrap();
+        assert!(command(Path::new("/rt"), &capped, 1)
+            .unwrap()
+            .env
+            .contains(&("GGML_CUDA_MOE_ARENA_MB".into(), "30720".into())));
         let nvidia = LoadRequest::from_json(&json!({"model_path": "/m.gguf", "gpus": [0],
             "gpu_devices": [{"index": 0, "vendor": "nvidia", "ordinal": 0},
                             {"index": 1, "vendor": "amd", "ordinal": 0}]}))
