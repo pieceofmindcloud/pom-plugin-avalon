@@ -68,6 +68,16 @@ pub fn all() -> Vec<Setting> {
             pom: false,
         },
         Setting {
+            key: "flash_attn",
+            kind: "boolean",
+            en: ("Flash attention", "On by default (Avalon's choice). Off only as a fallback for a card where it misbehaves; without it the V cache stays f16."),
+            pt: ("Flash attention", "Ligado por padrão (escolha do Avalon). Desligue só como alternativa numa placa em que ele falhe; sem ele o cache V fica em f16."),
+            min: None,
+            max: None,
+            options: &[],
+            pom: false,
+        },
+        Setting {
             key: "expert_ram_gb",
             kind: "integer",
             en: ("RAM for experts (GB)", "Host RAM this machine gives the experts the GPU does not hold (0 = automatic: every expert copied to RAM when they all fit, else a smaller arena). Set it when several stages share one machine: each measures the free RAM alone."),

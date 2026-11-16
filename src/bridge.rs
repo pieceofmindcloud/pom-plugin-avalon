@@ -361,6 +361,18 @@ fn prepare_turn(port: u16, body: &Value, engine_body: &mut Value) -> Result<Opti
     }
     let (slot, holds) = crate::sessions::slot_for(key).ok_or("sessions are off")?;
     if !holds {
+        // the slot held another conversation: empty it first, so the engine does not roll that one back to
+        // the shared prefix through its context checkpoints (a recurrent model's rollback hung an AMD card)
+        if engine_json(
+            port,
+            "POST",
+            &format!("/slots/{slot}?action=erase"),
+            &json!({}),
+        )
+        .is_err()
+        {
+            crate::sessions::release_slot(slot);
+        }
         if let Some(saved) = crate::sessions::saved_ids(key) {
             if crate::sessions::worth_restoring(&saved, &ids) {
                 let restored = engine_json(

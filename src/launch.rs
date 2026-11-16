@@ -201,6 +201,28 @@ fn amd_ordinals(request: &LoadRequest) -> Vec<String> {
         .collect()
 }
 
+/// Flash attention, on unless the deployment turns it off (a fallback for a card where it misbehaves).
+fn flash_attn(request: &LoadRequest) -> bool {
+    request
+        .settings
+        .get("flash_attn")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false)
+}
+
+/// The V cache type: a quantized V cache needs flash attention, so without it V stays f16.
+fn cache_v(request: &LoadRequest, flash: bool) -> String {
+    let v = request
+        .cache_type_v
+        .clone()
+        .unwrap_or_else(|| kv_name(&request.kv));
+    if flash || v == "f16" || v == "f32" || v == "bf16" {
+        v
+    } else {
+        "f16".into()
+    }
+}
+
 fn setting_u64(request: &LoadRequest, key: &str) -> Option<u64> {
     request
         .settings
@@ -211,6 +233,7 @@ fn setting_u64(request: &LoadRequest, key: &str) -> Option<u64> {
 pub fn command(runtime: &Path, request: &LoadRequest, port: u16) -> Result<Launch, String> {
     let role = stage_role(request)?;
     let whole = role == StageRole::Whole;
+    let flash = flash_attn(request);
     let mut args: Vec<String> = vec![
         "--host".into(),
         "127.0.0.1".into(),
@@ -226,17 +249,14 @@ pub fn command(runtime: &Path, request: &LoadRequest, port: u16) -> Result<Launc
         request.sessions.to_string(),
         "--jinja".into(),
         "--flash-attn".into(),
-        "on".into(),
+        if flash { "on" } else { "off" }.into(),
         "--cache-type-k".into(),
         request
             .cache_type_k
             .clone()
             .unwrap_or_else(|| kv_name(&request.kv)),
         "--cache-type-v".into(),
-        request
-            .cache_type_v
-            .clone()
-            .unwrap_or_else(|| kv_name(&request.kv)),
+        cache_v(request, flash),
         "--no-webui".into(),
     ];
     // The deployment's sampling defaults: llama-server applies them to a request that does not set them.
@@ -278,7 +298,7 @@ pub fn command(runtime: &Path, request: &LoadRequest, port: u16) -> Result<Launc
             "--cache-type-k-draft".into(),
             "q8_0".into(),
             "--cache-type-v-draft".into(),
-            "q8_0".into(),
+            if flash { "q8_0" } else { "f16" }.into(),
         ]);
     }
     // Conversation sessions: llama-server saves and restores a slot in the node's session folder.
@@ -330,6 +350,12 @@ pub fn command(runtime: &Path, request: &LoadRequest, port: u16) -> Result<Launc
         let amd = amd_ordinals(request);
         if !amd.is_empty() {
             env.push(("HIP_VISIBLE_DEVICES".into(), amd.join(",")));
+            // Avalon sizes each kernel's scratch on its dispatch (HSA_SCRATCH_SINGLE_LIMIT=1 MiB); ROCr's release of
+            // it after the dispatch never finished on an RX 7800 XT (gfx1101): the context hung at creation, or later
+            // at the first kernel needing more scratch. Kept, not released (freriadoc/Avalon#60).
+            if std::env::var_os("HSA_NO_SCRATCH_RECLAIM").is_none() {
+                env.push(("HSA_NO_SCRATCH_RECLAIM".into(), "1".into()));
+            }
         }
     }
     let mut program = runtime.join("bin/server");
@@ -526,6 +552,16 @@ mod tests {
             .env
             .contains(&("HIP_VISIBLE_DEVICES".into(), "0".into())));
         assert!(wants_hip(&request));
+        assert!(launch
+            .env
+            .iter()
+            .any(|(key, _)| key == "HSA_NO_SCRATCH_RECLAIM"));
+        let no_fa =
+            LoadRequest::from_json(&json!({"model_path": "/m.gguf", "cache_type_v": "q4_0",
+            "settings": {"flash_attn": false}}))
+            .unwrap();
+        let args = command(Path::new("/rt"), &no_fa, 1).unwrap().args.join(" ");
+        assert!(args.contains("--flash-attn off") && args.contains("--cache-type-v f16"));
         let capped = LoadRequest::from_json(
             &json!({"model_path": "/m.gguf", "settings": {"expert_ram_gb": 30}}),
         )
